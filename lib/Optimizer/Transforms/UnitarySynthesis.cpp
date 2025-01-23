@@ -433,7 +433,70 @@ struct TwoQubitOpKAK : public Decomposer {
     decompose();
   }
 };
+    
+//typedef Matrix< std::complex< double >, 8, 8 > Eigen::Matrix8cd
+using Matrix8cd = Eigen::Matrix< std::complex< double >, 8, 8 >;
+    
+struct ThreeQubitOpCSD : public Decomposer {
+  Matrix8cd targetMatrix;
+  /// Updates to the global phase
+  double phase;
 
+  void decompose() override {
+    /// Rescale the input unitary matrix, `u`, to be special unitary.
+    /// Extract a phase factor, `phase`, so that
+    /// `determinant(inverse_phase * unitary) = 1`
+    auto det = targetMatrix.determinant();
+    phase = 0.5 * std::arg(det); // ! What is the 0.5? Copied from above.
+    // Apply SVD to the top left quadrant. I considered using the
+    // already existing bidiagonalize, but it is not clear yet that it
+    // is applicable.
+    Eigen::Matrix4cd T11 = targetMatrix(Eigen::seq(0, 3), Eigen::seq(0, 3));
+    Eigen::JacobiSVD<Eigen::Matrix4cd> svd1(T11);
+    Eigen::Matrix4cd A1 = svd1.matrixU();
+    Eigen::Matrix4cd B1 = svd1.matrixV();
+    // Apply SVD to the bottom right quadrant:
+    Eigen::Matrix4cd T22 = targetMatrix(Eigen::seq(4, 7), Eigen::seq(4, 7));
+    Eigen::JacobiSVD<Eigen::Matrix4cd> svd2(T22);
+    // Commented out to avoid unused variable error:
+    //Eigen::Matrix4cd A2 = svd2.matrixU();
+    Eigen::Matrix4cd B2 = svd2.matrixV();
+    // Now set C = A1'*T11*B1:
+    Eigen::Matrix4cd C = A1.transpose()*T11*B1;
+    assert(C.isDiagonal(TOL));
+    // Now set S = A1'*T12*B2:
+    Eigen::Matrix4cd T12 = targetMatrix(Eigen::seq(0, 3), Eigen::seq(4, 7));
+    Eigen::Matrix4cd S = A1.transpose()*T12*B2;
+    assert(S.isDiagonal(TOL));
+    // Ok, so far we decomposed the target matrix as follows:
+    // [A1 0; 0 A2]*[C S; -S' C]*[B1 0; 0 B2]
+  }
+
+  void emitDecomposedFuncOp(quake::CustomUnitarySymbolOp customOp,
+                            PatternRewriter &rewriter,
+                            std::string funcName) override {
+    auto parentModule = customOp->getParentOfType<ModuleOp>();
+//    Location loc = customOp->getLoc();
+    auto targets = customOp.getTargets();
+    auto funcTy =
+        FunctionType::get(parentModule.getContext(), targets[0].getType(), {});
+//    auto insPt = rewriter.saveInsertionPoint();
+    rewriter.setInsertionPointToStart(parentModule.getBody());
+    auto func =
+        rewriter.create<func::FuncOp>(parentModule->getLoc(), funcName, funcTy);
+    func.setPrivate();
+    auto *block = func.addEntryBlock();
+    rewriter.setInsertionPointToStart(block);
+//    auto arguments = func.getArguments();
+//    FloatType floatTy = rewriter.getF64Type();
+  }
+
+  ThreeQubitOpCSD(const Matrix8cd &vec) {
+    targetMatrix = vec;
+    decompose();
+  }
+};
+    
 class CustomUnitaryPattern
     : public OpRewritePattern<quake::CustomUnitarySymbolOp> {
 public:
@@ -469,6 +532,10 @@ public:
       case 4: {
         auto kak = TwoQubitOpKAK(unitary);
         kak.emitDecomposedFuncOp(customOp, rewriter, funcName);
+      } break;
+      case 8: {
+       auto csd = ThreeQubitOpCSD(unitary);
+       csd.emitDecomposedFuncOp(customOp, rewriter, funcName);
       } break;
       default:
         customOp.emitWarning(

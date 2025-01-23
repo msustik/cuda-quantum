@@ -302,8 +302,8 @@ def test_3q_unitary_synthesis():
         x(q)
         toffoli(q[0], q[1], q[2])
 
-    with pytest.raises(RuntimeError):
-        cudaq.sample(test_toffoli)
+#    with pytest.raises(RuntimeError):
+    cudaq.sample(test_toffoli)
 
 
 # leave for gdb debugging
